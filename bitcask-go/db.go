@@ -57,6 +57,37 @@ func Open(options Options) (*DB, error) {
 	return db, nil
 }
 
+// CLose 关闭数据库
+func (db *DB) Close() error {
+	if db.activeFile == nil {
+		return nil
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	// 关闭当前活跃文件
+	if err := db.activeFile.Close(); err != nil {
+		return err
+	}
+	// 关闭旧的数据文件
+	for _, file := range db.olderFiles {
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Sync 持久化数据文件
+func (db *DB) Sync() error {
+	if db.activeFile == nil {
+		return nil
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.activeFile.Sync()
+}
+
 // Put 写入Key/Value 数据，Key不能为空
 func (db *DB) Put(key []byte, value []byte) error {
 	// 判断key是否有效
@@ -130,6 +161,42 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		return nil, ErrKeyNotFound
 	}
 
+	// 从数据文件中获取value
+	return db.getValueByPosition(logRecordPos)
+}
+
+// ListKeys 获取数据库中所有的key
+func (db *DB) ListKeys() [][]byte {
+	iterator := db.index.Iterator(false)
+	keys := make([][]byte, db.index.Size())
+	var idx int
+	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
+		keys[idx] = iterator.Key()
+		idx++
+	}
+	return keys
+}
+
+// Fold 获取所有的数据，并执行用户指定的操作，函数返回false时终止遍历
+func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	Iterator := db.index.Iterator(false)
+	for Iterator.Rewind(); Iterator.Valid(); Iterator.Next() {
+		value, err := db.getValueByPosition(Iterator.Value())
+		if err != nil {
+			return err
+		}
+		if !fn(Iterator.Key(), value) {
+			break
+		}
+	}
+	return nil
+}
+
+// 根据索引信息获取对应的value
+func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error) {
 	// 根据文件对应的id找到对应的数据文件
 	var dataFile *data.DataFile
 	if db.activeFile.FileId == logRecordPos.Fid {
@@ -153,7 +220,6 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	}
 
 	return logRecord.Value, nil
-
 }
 
 // appendLogRecord 追加写数据到活跃文件中
